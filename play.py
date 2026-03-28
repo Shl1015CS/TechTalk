@@ -79,6 +79,10 @@ def _encode_e8m0_pow2(scale_f32: torch.Tensor) -> torch.Tensor:
     exp_biased = (exp_unbiased + 127).clamp(0, 255)
     return exp_biased.to(torch.uint8)
 
+def e8m0_to_f32(scale_e8m0: torch.Tensor) -> torch.Tensor:
+    exp_unbiased = scale_e8m0.to(torch.int32) - 127
+    return torch.pow(2.0, exp_unbiased.to(torch.float32))
+
 def dynamic_mxfp4_quant(x2d: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
     rows, cols = x2d.shape
     nb = cols // MXFP4_BLOCK
@@ -133,7 +137,7 @@ def _mla_splitk_attn_kernel(
     KV_ptr,
     QO_INDPTR_ptr,
     KV_INDPTR_ptr,
-    PATIAL_O_ptr,
+    PARTIAL_O_ptr,
     PARTIAL_LSE_ptr,
     PARTIAL_M_ptr,
     sm_scale: tl.constexpr,
@@ -171,7 +175,7 @@ def _mla_splitk_attn_kernel(
             d_offset = tl.arange(0, BLOCK_D_V)
             mask_v = d_offset < V_HEAD_DIM
             offset_o = q_idx * NUM_KV_SPLITS * NUM_HEADS * V_HEAD_DIM + split_id * NUM_HEADS * V_HEAD_DIM + h * V_HEAD_DIM
-            tl.store(PATIAL_O_ptr + offset_o + d_offset, tl.zeros([BLOCK_D_V], dtype=tl.float32), mask=mask_v)
+            tl.store(PARTIAL_O_ptr + offset_o + d_offset, tl.zeros([BLOCK_D_V], dtype=tl.float32), mask=mask_v)
         return
     
     q_base = q_idx * NUM_HEADS * QK_HEAD_DIM
@@ -192,14 +196,14 @@ def _mla_splitk_attn_kernel(
                 kv_idx = kv_pos + kv_t
                 if kv_idx >= actual_end:
                     break
-                kv_base = kv_idx * NUM_KV_HEADS * QK_HEAD_DIM
-                k_vec = tl.load(KV_ptr + kv_base, mask=mask_qk, other=0.0).to(tl.float32)
+                kv_base = kv_idx * QK_HEAD_DIM
+                k_vec = tl.load(KV_ptr + kv_base + qk_offset, mask=mask_qk, other=0.0).to(tl.float32)
 
                 score = tl.sum(q_h * k_vec) * sm_scale
 
                 m_new = tl.maximum(m_i, score)
-                alpha = tl.exp(score - m_new)
-                p = tl.exp(m_i - m_new)
+                alpha = tl.exp(m_i - m_new)
+                p = tl.exp(score - m_new)
 
                 l_i = l_i * alpha + p
                 acc = acc * alpha
@@ -218,7 +222,7 @@ def _mla_splitk_attn_kernel(
         offset_o = q_idx * NUM_KV_SPLITS * NUM_HEADS * V_HEAD_DIM + split_id * NUM_HEADS * V_HEAD_DIM + h * V_HEAD_DIM
         d_offset = tl.arange(0, BLOCK_D_V)
         mask_v = d_offset < V_HEAD_DIM
-        tl.store(PATIAL_O_ptr + offset_o + d_offset, acc, mask=mask_v)
+        tl.store(PARTIAL_O_ptr + offset_o + d_offset, acc, mask=mask_v)
 
 @triton.jit
 def _mla_splitk_reduce_kernel(
@@ -259,7 +263,7 @@ def _mla_splitk_reduce_kernel(
         weighted_l = l_s * alpha
         global_l += weighted_l
 
-        o_s = tl.load(PATIAL_O_ptr + base_o + s * NUM_HEADS * V_HEAD_DIM + d_offsets, mask = mask_v, other=0.0)
+        o_s = tl.load(PARTIAL_O_ptr + base_o + s * NUM_HEADS * V_HEAD_DIM + d_offsets, mask = mask_v, other=0.0)
         acc += o_s * alpha
     
     inv_l = 1.0 / tl.maximum(global_l, 1e-12)
