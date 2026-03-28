@@ -95,6 +95,12 @@ def generate_input(batchsize: int, qseqlen: int, kvseqlen: int, seed: int) -> in
 
     return (q, kv_data, qo_indptr, kv_indptr, config)
 
+@torch.compile(mode="max-autotune-no-cudagraph", dynamic=False)
+def _mla_attn_fused(q_batch, kv_batch, v_batch, sm_scale):
+    scores = torch.bmm(q_batch, kv_batch.transpose(1,2))
+    scores *= sm_scale
+    attn = torch.softmax(scores, dim=-1)
+    return torch.bmm(attn, v_batch)
 
 def custom_kernel(data: input_t) -> output_t:
     q, kv_data, qo_indptr, kv_indptr, config = data
@@ -117,13 +123,8 @@ def custom_kernel(data: input_t) -> output_t:
 
     q_batch = q.view(batch_size, nq, dq)
     kv_batch = kv_buffer.view(batch_size, kv_seq_len, dq)
-
-    scores = torch.bmm(q_batch, kv_batch.transpose(1, 2))
-    scores.mul_(sm_scale)
-    attn = torch.softmax(scores.float(), dim=-1).to(torch.bfloat16)
-
-    out = torch.bmm(attn, kv_batch)[:, :, :dv]
-    
-    return out.contiguous().view(-1, nq, dv)
+    v_batch = kv_batch[:, :, :dv].contiguous()
+    out = _mla_attn_fused(q_batch, kv_batch, v_batch)
+    return out.reshape(-1, nq, dv)
 
 check_implementation = make_match_reference(custom_kernel, rtol=1e-1, atol=1e-1)
