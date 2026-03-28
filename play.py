@@ -1,5 +1,4 @@
 import math
-import os
 from typing import Dict, Tuple
 import torch
 import triton
@@ -35,6 +34,7 @@ V_HEAD_DIM = KV_LORA_RANK
 SM_SCALE = 1.0 / (QK_HEAD_DIM ** 0.5)
 MXFP4_BLOCK = 32
 MXFP4_E2M1_MAX = 6.0
+NUM_KV_SPLITS = 32
 
 def _pick_fp8_dtype() -> torch.dtype:
     # For simplicity, we use the same FP8 format for all tensors.
@@ -74,7 +74,6 @@ def quantize_fp8(tensor: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
     return fp8_tensor, scale.to(torch.float32).reshape(1)
 
 def _encode_e8m0_pow2(scale_f32: torch.Tensor) -> torch.Tensor:
-    # Encode the FP32 scale into E8M0 format (5 bits exponent, 3 bits mantissa)
     log2_scale = torch.log2(scale_f32.clamp(min=2.0 ** -126))
     exp_unbiased = torch.round(log2_scale).to(torch.int32)
     exp_biased = (exp_unbiased + 127).clamp(0, 255)
@@ -97,7 +96,7 @@ def dynamic_mxfp4_quant(x2d: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
     packed = (lo | (hi << 4)).contiguous()
     return packed, scale_e8m0.contiguous()
 
-def mxfp4_to_f32(fp4_data: torch.Tensor) -> torch.Tensor:
+def mxfp4_to_f32(fp4_data_2d: torch.Tensor) -> torch.Tensor:
     byte = fp4_data_2d.to(torch.uint8)
     lo = byte & 0x0F
     hi = (byte >> 4) & 0x0F
@@ -129,7 +128,7 @@ def dequantize_mxfp4_block(
     return scaled.reshape(b, m, n).to(torch.bfloat16)
 
 @triton.jit
-def _mla_splite_attn_kernel(
+def _mla_splitk_attn_kernel(
     Q_ptr,
     KV_ptr,
     QO_INDPTR_ptr,
@@ -225,6 +224,7 @@ def _mla_splite_attn_kernel(
 def _mla_splitk_reduce_kernel(
     PARTIAL_O_ptr,
     PARTIAL_LSE_ptr,
+    PARTIAL_M_ptr,
     OUT_ptr,
     total_q: tl.constexpr,
     NUM_HEADS: tl.constexpr,
@@ -375,9 +375,9 @@ def _mla_decode_triton(
 
     BLOCK_D_QK = triton.next_power_of_2(QK_HEAD_DIM)
     BLOCK_D_V = triton.next_power_of_2(dv)
-    grid_attn = (total_q_tokens * num_kv_splits * nq,)
+    grid_attn = (total_q_tokens * num_kv_splits,)
 
-    _mla_splite_attn_kernel[grid_attn](
+    _mla_splitk_attn_kernel[grid_attn](
         q, kv_flat, qo_indptr, kv_indptr,
         partial_o, partial_lse, partial_m,
         sm_scale=SM_SCALE,
@@ -511,4 +511,4 @@ def custom_kernel(data: input_t) -> output_t:
         config=config, num_kv_splits=num_splits,
     )
 
-checker = make_match_reference(custom_kernel, rtol=1e-1, atol=1e-1)
+check_implementation = make_match_reference(custom_kernel, rtol=1e-1, atol=1e-1)
