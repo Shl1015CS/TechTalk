@@ -1,7 +1,39 @@
+seed: 4217; qseqlen: 1; kvseqlen: 1024; batchsize: 4
+ ⏱ 10.4 ± 0.02 ms
+ ⚡ 9.53 ms 🐌 12.7 ms
+
+seed: 4220; qseqlen: 1; kvseqlen: 8192; batchsize: 4
+ ⏱ 19.6 ± 0.03 ms
+ ⚡ 18.6 ms 🐌 24.2 ms
+
+seed: 5412; qseqlen: 1; kvseqlen: 1024; batchsize: 32
+ ⏱ 25.6 ± 0.02 ms
+ ⚡ 25.5 ms 🐌 25.6 ms
+
+seed: 5415; qseqlen: 1; kvseqlen: 8192; batchsize: 32
+ ⏱ 45.7 ± 0.01 ms
+ ⚡ 45.7 ms 🐌 45.7 ms
+
+seed: 1357; qseqlen: 1; kvseqlen: 1024; batchsize: 64
+ ⏱ 29.3 ± 0.06 ms
+ ⚡ 27.5 ms 🐌 35.5 ms
+
+seed: 1360; qseqlen: 1; kvseqlen: 8192; batchsize: 64
+ ⏱ 92.0 ± 0.20 ms
+ ⚡ 86.3 ms 🐌 108 ms
+
+seed: 9823; qseqlen: 1; kvseqlen: 1024; batchsize: 256
+ ⏱ 125 ± 0.2 ms
+ ⚡ 118 ms 🐌 149 ms
+
+seed: 9826; qseqlen: 1; kvseqlen: 8192; batchsize: 256
+ ⏱ 231 ± 0.2 ms
+ ⚡ 230 ms 🐌 233 ms
+
 {
-  "stderr": "[aiter] start build [module_aiter_enum] under /home/runner/aiter/aiter/jit/build/module_aiter_enum\n[aiter] \u001b[32mfinish build [module_aiter_enum], cost 7.7s \u001b[0m\n[aiter] import [module_aiter_enum] under /home/runner/aiter/aiter/jit/module_aiter_enum.so\n[aiter] import [module_aiter_enum] under /home/runner/aiter/aiter/jit/module_aiter_enum.so\n:0:rocdevice.cpp            :3580: 169434976756 us:  Callback: Queue 0x76bebf200000 aborting with error : HSA_STATUS_ERROR_EXCEPTION: An HSAIL operation resulted in a hardware exception. code: 0x1016\n[aiter] import [module_aiter_enum] under /home/runner/aiter/aiter/jit/module_aiter_enum.so\n",
-  "success": false,
-  "exit_code": 114,
-  "exit_code_info": "Process was shut down because it timed out.",
-  "duration": 900
+  "stderr": "[aiter] start build [module_aiter_enum] under /home/runner/aiter/aiter/jit/build/module_aiter_enum\n[aiter] \u001b[32mfinish build [module_aiter_enum], cost 9.3s \u001b[0m\n[aiter] import [module_aiter_enum] under /home/runner/aiter/aiter/jit/module_aiter_enum.so\n[aiter] import [module_aiter_enum] under /home/runner/aiter/aiter/jit/module_aiter_enum.so\n[aiter] start build [module_mla_metadata] under /home/runner/aiter/aiter/jit/build/module_mla_metadata\n[aiter] \u001b[32mfinish build [module_mla_metadata], cost 31.8s \u001b[0m\n[aiter] import [module_mla_metadata] under /home/runner/aiter/aiter/jit/module_mla_metadata.so\n[aiter] type hints mismatch, override to --> get_mla_metadata_v1(seqlens_qo_indptr: torch.Tensor, seqlens_kv_indptr: torch.Tensor, kv_last_page_lens: torch.Tensor, num_heads_per_head_k: int | typing.SupportsIndex, num_heads_k: int | typing.SupportsIndex, is_causal: bool, work_metadata_ptrs: torch.Tensor, work_info_set: torch.Tensor, work_indptr: torch.Tensor, reduce_indptr: torch.Tensor, reduce_final_map: torch.Tensor, reduce_partial_map: torch.Tensor, page_size: int | typing.SupportsIndex = 1, kv_granularity: int | typing.SupportsIndex = 16, max_seqlen_qo: int | typing.SupportsIndex = -1, uni_seqlen_qo: int | typing.SupportsIndex = -1, fast_mode: bool = True, topk: int | typing.SupportsIndex = -1, max_split_per_batch: int | typing.SupportsIndex = -1, intra_batch_mode: bool = False, dtype_q: Optional[torch.dtype] = None, dtype_kv: Optional[torch.dtype] = None) -> None\n[aiter] start build [module_mla_asm] under /home/runner/aiter/aiter/jit/build/module_mla_asm\n/home/runner/aiter/hsa/codegen.py:13: Pandas4Warning: 'future.no_silent_downcasting' is deprecated, please refrain from using it.\n  pd.set_option(\"future.no_silent_downcasting\", True)\n/home/runner/aiter/hsa/codegen.py:86: Pandas4Warning: The copy keyword is deprecated and will be removed in a future version. Copy-on-Write is active in pandas since 3.0 which utilizes a lazy copy mechanism that defers copies until necessary. Use .copy() to make an eager copy if necessary.\n  pd.concat(dfs, ignore_index=True).fillna(0).infer_objects(copy=False)\n[aiter] \u001b[32mfinish build [module_mla_asm], cost 20.5s \u001b[0m\n[aiter] import [module_mla_asm] under /home/runner/aiter/aiter/jit/module_mla_asm.so\n[aiter] type hints mismatch, override to --> mla_decode_stage1_asm_fwd(Q: torch.Tensor, KV: torch.Tensor, qo_indptr: torch.Tensor, kv_indptr: torch.Tensor, kv_page_indices: torch.Tensor, kv_last_page_lens: torch.Tensor, num_kv_splits_indptr: Optional[torch.Tensor], work_meta_data: Optional[torch.Tensor], work_indptr: Optional[torch.Tensor], work_info_set: Optional[torch.Tensor], max_seqlen_q: int | typing.SupportsIndex, page_size: int | typing.SupportsIndex, nhead_kv: int | typing.SupportsIndex, softmax_scale: float | typing.SupportsIndex, splitData: torch.Tensor, splitLse: torch.Tensor, output: torch.Tensor, q_scale: Optional[torch.Tensor] = None, kv_scale: Optional[torch.Tensor] = None) -> None\n[aiter] start build [module_mla_reduce] under /home/runner/aiter/aiter/jit/build/module_mla_reduce\n[aiter] \u001b[32mfinish build [module_mla_reduce], cost 171.5s \u001b[0m\n[aiter] import [module_mla_reduce] under /home/runner/aiter/aiter/jit/module_mla_reduce.so\n[aiter] type hints mismatch, override to --> mla_reduce_v1(partial_output: torch.Tensor, partial_lse: torch.Tensor, reduce_indptr: torch.Tensor, reduce_final_map: Optional[torch.Tensor], reduce_partial_map: torch.Tensor, max_seqlen_q: int | typing.SupportsIndex, final_output: torch.Tensor, final_lse: Optional[torch.Tensor] = None) -> None\n",
+  "success": true,
+  "exit_code": 0,
+  "exit_code_info": null,
+  "duration": 494.4666550029069
 }
