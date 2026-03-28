@@ -125,6 +125,7 @@ def custom_kernel(data: input_t) -> output_t:
     kv_batch = kv_buffer.view(batch_size, kv_seq_len, dq)
     v_batch = kv_batch[:, :, :dv].contiguous()
     out = _mla_attn_fused(q_batch, kv_batch, v_batch)
+
     return out.reshape(-1, nq, dv)
 
 check_implementation = make_match_reference(custom_kernel, rtol=1e-1, atol=1e-1)
