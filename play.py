@@ -272,7 +272,7 @@ def _mla_splitk_reduce_kernel(
     out_offset = q_idx * NUM_HEADS * V_HEAD_DIM + h * V_HEAD_DIM
     tl.store(OUT_ptr + out_offset + d_offsets, result.to(tl.bfloat16), mask=mask_v)
 
-def _mla_decode_splitek_pytorch(
+def _mla_decode_splitk_pytorch(
     q: torch.Tensor,
     kv_buffer: torch.Tensor,
     qo_indptr: torch.Tensor,
@@ -487,7 +487,7 @@ def custom_kernel(data: input_t) -> output_t:
         kv_fp4, kv_scale_e8m0 = kv_data["mxfp4"]
         total_kv = kv_fp4.shape[0]
         kv_buffer = dequantize_mxfp4_block(
-            kv_fp4, kv_scale_e8m0, 
+            kv_fp4, kv_scale_e8m0,
             (total_kv, NUM_KV_HEADS, QK_HEAD_DIM),
         )
     elif "fp8" in kv_data:
@@ -496,20 +496,10 @@ def custom_kernel(data: input_t) -> output_t:
         kv_buffer = kv_buffer.to(torch.bfloat16)
     else:
         kv_buffer = kv_data["bf16"]
-    
+
     num_splits = _pick_num_splits(kv_seq_len, batch_size)
 
-    try:
-        if _check_triton_available():
-            return _mla_decode_triton(
-                q=q, kv_buffer=kv_buffer, 
-                qo_indptr=qo_indptr, kv_indptr=kv_indptr, 
-                config=config, num_kv_splits=num_splits,
-            )
-    except Exception as e:
-        pass
-    
-    return _mla_decode_splitek_pytorch(
+    return _mla_decode_splitk_pytorch(
         q=q, kv_buffer=kv_buffer,
         qo_indptr=qo_indptr, kv_indptr=kv_indptr,
         config=config, num_kv_splits=num_splits,
