@@ -223,7 +223,7 @@ def _flash_decode_mxfp4_kernel(
                   + (sk_range // VEC)[:, None] * stride_kss
                   + tl.arange(0, BLOCK_DQ // VEC)[None, :] * stride_ksd)
         k_scales = tl.load(ks_ptr,
-                           mask=mask_sk[:, None],
+                           mask=mask_sk[:, None] & (tl.arange(0, BLOCK_DQ // VEC)[None, :] < Dq // VEC),
                            other=0)  # uint8 [BLOCK_SK, Dq//VEC]
 
         # ── QK^T via tl.dot_scaled ───────────────────────────────────────────
@@ -419,7 +419,7 @@ def generate_input(batchsize: int, qseqlen: int, kvseqlen: int, seed: int) -> in
 # BLOCK_SK=128: fits in LDS, good reuse over Dq=576
 # BLOCK_DV=128: 4 tiles cover Dv=512
 _BLOCK_SK  = 128
-_BLOCK_DQ  = QK_HEAD_DIM   # 576  (must == Dq for full Q load)
+_BLOCK_DQ  = 1024           # next power of 2 >= QK_HEAD_DIM=576, allows simpler indexing and max tile size for reuse
 _BLOCK_DV  = 128            # tile V head dim
 
 import torch.nn.functional as F
