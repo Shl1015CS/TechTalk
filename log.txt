@@ -1,39 +1,7 @@
-seed: 4217; qseqlen: 1; kvseqlen: 1024; batchsize: 4
- ⏱ 30.0 ± 0.06 µs
- ⚡ 28.9 µs 🐌 33.7 µs
-
-seed: 4220; qseqlen: 1; kvseqlen: 8192; batchsize: 4
- ⏱ 47.4 ± 0.09 µs
- ⚡ 46.3 µs 🐌 52.1 µs
-
-seed: 5412; qseqlen: 1; kvseqlen: 1024; batchsize: 32
- ⏱ 50.8 ± 0.12 µs
- ⚡ 49.2 µs 🐌 57.4 µs
-
-seed: 5415; qseqlen: 1; kvseqlen: 8192; batchsize: 32
- ⏱ 185 ± 0.2 µs
- ⚡ 181 µs 🐌 193 µs
-
-seed: 1357; qseqlen: 1; kvseqlen: 1024; batchsize: 64
- ⏱ 67.3 ± 0.12 µs
- ⚡ 65.0 µs 🐌 71.6 µs
-
-seed: 1360; qseqlen: 1; kvseqlen: 8192; batchsize: 64
- ⏱ 315 ± 0.4 µs
- ⚡ 306 µs 🐌 326 µs
-
-seed: 9823; qseqlen: 1; kvseqlen: 1024; batchsize: 256
- ⏱ 182 ± 0.2 µs
- ⚡ 177 µs 🐌 189 µs
-
-seed: 9826; qseqlen: 1; kvseqlen: 8192; batchsize: 256
- ⏱ 989 ± 1.0 µs
- ⚡ 979 µs 🐌 999 µs
-
 {
-  "stderr": "[aiter] import [module_aiter_enum] under /home/runner/aiter/aiter/jit/module_aiter_enum.so\n[aiter] import [module_aiter_enum] under /home/runner/aiter/aiter/jit/module_aiter_enum.so\n[aiter] import [module_mla_metadata] under /home/runner/aiter/aiter/jit/module_mla_metadata.so\n[aiter] type hints mismatch, override to --> get_mla_metadata_v1(seqlens_qo_indptr: torch.Tensor, seqlens_kv_indptr: torch.Tensor, kv_last_page_lens: torch.Tensor, num_heads_per_head_k: int | typing.SupportsIndex, num_heads_k: int | typing.SupportsIndex, is_causal: bool, work_metadata_ptrs: torch.Tensor, work_info_set: torch.Tensor, work_indptr: torch.Tensor, reduce_indptr: torch.Tensor, reduce_final_map: torch.Tensor, reduce_partial_map: torch.Tensor, page_size: int | typing.SupportsIndex = 1, kv_granularity: int | typing.SupportsIndex = 16, max_seqlen_qo: int | typing.SupportsIndex = -1, uni_seqlen_qo: int | typing.SupportsIndex = -1, fast_mode: bool = True, topk: int | typing.SupportsIndex = -1, max_split_per_batch: int | typing.SupportsIndex = -1, intra_batch_mode: bool = False, dtype_q: Optional[torch.dtype] = None, dtype_kv: Optional[torch.dtype] = None) -> None\n[aiter] import [module_mla_asm] under /home/runner/aiter/aiter/jit/module_mla_asm.so\n[aiter] type hints mismatch, override to --> mla_decode_stage1_asm_fwd(Q: torch.Tensor, KV: torch.Tensor, qo_indptr: torch.Tensor, kv_indptr: torch.Tensor, kv_page_indices: torch.Tensor, kv_last_page_lens: torch.Tensor, num_kv_splits_indptr: Optional[torch.Tensor], work_meta_data: Optional[torch.Tensor], work_indptr: Optional[torch.Tensor], work_info_set: Optional[torch.Tensor], max_seqlen_q: int | typing.SupportsIndex, page_size: int | typing.SupportsIndex, nhead_kv: int | typing.SupportsIndex, softmax_scale: float | typing.SupportsIndex, splitData: torch.Tensor, splitLse: torch.Tensor, output: torch.Tensor, q_scale: Optional[torch.Tensor] = None, kv_scale: Optional[torch.Tensor] = None) -> None\n[aiter] import [module_mla_reduce] under /home/runner/aiter/aiter/jit/module_mla_reduce.so\n[aiter] type hints mismatch, override to --> mla_reduce_v1(partial_output: torch.Tensor, partial_lse: torch.Tensor, reduce_indptr: torch.Tensor, reduce_final_map: Optional[torch.Tensor], reduce_partial_map: torch.Tensor, max_seqlen_q: int | typing.SupportsIndex, final_output: torch.Tensor, final_lse: Optional[torch.Tensor] = None) -> None\n",
-  "success": true,
-  "exit_code": 0,
-  "exit_code_info": null,
-  "duration": 23.76484627299942
+  "stderr": "[aiter] start build [module_aiter_enum] under /home/runner/aiter/aiter/jit/build/module_aiter_enum\n[aiter] \u001b[32mfinish build [module_aiter_enum], cost 7.7s \u001b[0m\n[aiter] import [module_aiter_enum] under /home/runner/aiter/aiter/jit/module_aiter_enum.so\n[aiter] import [module_aiter_enum] under /home/runner/aiter/aiter/jit/module_aiter_enum.so\nmultiprocessing.pool.RemoteTraceback: \n\"\"\"\nTraceback (most recent call last):\n  File \"/usr/lib/python3.12/multiprocessing/pool.py\", line 125, in worker\n    result = (True, func(*args, **kwds))\n                    ^^^^^^^^^^^^^^^^^^^\n  File \"/home/runner/_work/kernelbot/kernelbot/eval.py\", line 215, in _run_single_benchmark\n    output = custom_kernel(data)\n             ^^^^^^^^^^^^^^^^^^^\n  File \"/home/runner/_work/kernelbot/kernelbot/submission.py\", line 429, in custom_kernel\n    key  = kv_data[\"_key\"]\n           ~~~~~~~^^^^^^^^\nKeyError: '_key'\n\"\"\"\n\nThe above exception was the direct cause of the following exception:\n\nTraceback (most recent call last):\n  File \"/home/runner/_work/kernelbot/kernelbot/eval.py\", line 387, in <module>\n    sys.exit(main())\n             ^^^^^^\n  File \"/home/runner/_work/kernelbot/kernelbot/eval.py\", line 359, in main\n    return run_benchmarking(logger, pool, tests)\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/home/runner/_work/kernelbot/kernelbot/eval.py\", line 289, in run_benchmarking\n    run_single_benchmark(pool, tests[0], False, 100, 10e7)\n  File \"/home/runner/_work/kernelbot/kernelbot/eval.py\", line 276, in run_single_benchmark\n    return pool.apply(_run_single_benchmark, (test, recheck, max_repeats, max_time_ns))\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/usr/lib/python3.12/multiprocessing/pool.py\", line 360, in apply\n    return self.apply_async(func, args, kwds).get()\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/usr/lib/python3.12/multiprocessing/pool.py\", line 774, in get\n    raise self._value\nKeyError: '_key'\n",
+  "success": false,
+  "exit_code": 1,
+  "exit_code_info": "non-running exit code found: 1",
+  "duration": 12.79075801098952
 }
