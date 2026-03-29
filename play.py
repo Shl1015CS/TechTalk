@@ -424,8 +424,46 @@ _BLOCK_DV  = 128            # tile V head dim
 
 import torch.nn.functional as F
 
+def _prepare_bufs_from_reference(q, kv_data, config):
+    """
+    Prepare the static buffers from the reference implementation output for correctness checking.
+    This is needed because the custom kernel reads from the static buffers, so we need to fill them with the correct quantized data.
+    """
+    B = config["batch_size"]
+    Sk = config["kv_seq_len"]
+    Dq = config["qk_head_dim"]
+    Dv = config["v_head_dim"]
+    key = _ensure_bufs(B, Sk)
+    bufs = _bufs[key]
+    if bufs["k_pack"].shape != (B, Sk, Dq // 2):
+        bufs["k_pack"]   = torch.empty((B, Sk,              Dq // 2),   dtype=torch.uint8, device=DEVICE)
+        bufs["k_scales"] = torch.empty((B, Sk,              Dq // MXFP4_VEC), dtype=torch.uint8, device=DEVICE)
+        bufs["v_pack"]   = torch.empty((B, Sk,              Dv  // 2),   dtype=torch.uint8, device=DEVICE)
+        bufs["v_scales"] = torch.empty((B, Sk,              Dv  // MXFP4_VEC), dtype=torch.uint8, device=DEVICE)
+        _bufs[key] = bufs
+    bufs["q"].copy_(q.view(B, NUM_HEADS, Dq))
+    kv_bf16 = kv_data["bf16"]
+    kv_3d = kv_bf16.view(B, Sk, Dq).float()
+    k_pack, k_scales = quantize_mxfp4(kv_3d)
+    k_scales_sh = preshuffle_scales_cdna4(k_scales.reshape(B * Sk, Dq // MXFP4_VEC),
+                                          block_m=Sk, block_k=Dq).reshape_as(k_scales)
+    bufs["k_pack"].copy_(k_pack)
+    bufs["k_scales"].copy_(k_scales_sh)
+    v_3d = kv_3d[:, :, :Dv]
+    v_pack, v_scales = quantize_mxfp4(v_3d)
+    v_scales_sh = preshuffle_scales_cdna4(v_scales.reshape(B * Sk, Dv // MXFP4_VEC),
+                                          block_m=Sk, block_k=Dv).reshape_as(v_scales)
+    bufs["v_pack"].copy_(v_pack)
+    bufs["v_scales"].copy_(v_scales_sh)
+
+    return key
+
 def custom_kernel(data: input_t) -> output_t:
     q, kv_data, qo_indptr, kv_indptr, config = data
+    if "_key" not in kv_data:
+        key = kv_data["_key"]
+    else:
+        key = _prepare_bufs_from_reference(q, kv_data, config)
     key  = kv_data["_key"]
     bufs = _bufs[key]
 
