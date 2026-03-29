@@ -460,11 +460,10 @@ def _prepare_bufs_from_reference(q, kv_data, config):
 
 def custom_kernel(data: input_t) -> output_t:
     q, kv_data, qo_indptr, kv_indptr, config = data
-    if "_key" not in kv_data:
+    if "_key" in kv_data:
         key = kv_data["_key"]
     else:
         key = _prepare_bufs_from_reference(q, kv_data, config)
-    key  = kv_data["_key"]
     bufs = _bufs[key]
 
     B  = config["batch_size"]
