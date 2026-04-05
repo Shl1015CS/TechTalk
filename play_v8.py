@@ -24,22 +24,22 @@ FP8_DTYPE = torch.float8_e4m3fn
 _BLOCK_SK = 64
 _NUM_CUS = 256
 
-def _get_num_spilts(B, Sk):
+def _get_num_splits(B, Sk):
     ns = max(4, math.ceil(_NUM_CUS / B))
     ns = 1 << math.ceil(math.log2(ns))
     max_ns = Sk // _BLOCK_SK
     ns = min(ns,max_ns)
-    ns = 1 << int(math.log2(ns))\
+    ns = 1 << int(math.log2(ns))
     return ns
 
 @triton.jit
 def _mla_stage1(
-    Q_ptr,KV_ptr,Out_ptr, PLse_ptr,
+    Q_ptr, KV_ptr, POut_ptr, PLse_ptr,
     stride_qb, stride_qh, stride_qd,
     stride_kvb, stride_kvs, stride_kvd,
     stride_pob, stride_pos, stride_poh, stride_pod,
     stride_plb, stride_pls, stride_plh,
-    Sk,sm_scale, splite_size,
+    Sk, sm_scale, split_size,
     H: tl.constexpr,
     D_LORA: tl.constexpr,
     D_ROPE: tl.constexpr,
@@ -88,15 +88,19 @@ def _mla_stage1(
         P = tl.exp(scores - m_new[:, None])
         l_i = l_i * alpha + tl.sum(P, axis=1)
         acc = acc * alpha[:, None]
-        lse = m_i + tl.log(l_i)
-        tl.store(
-            POut_ptr + bid * stride_pob + sid * stride_pos + h_offs[:, None] * stride_poh + d_lora[None, :] * stride_pod,
-            acc.to(tl.bfloat16),
-        )
-        tl.store(
-            PLse_ptr + bid * stride_plb + sid * stride_pls + h_offs * stride_plh,
-            lse,
-        )
+        acc += tl.dot(P.to(tl.bfloat16, kv_lora.to(bfloat16), out_dtype = tl.float32))
+        m_i = m_new
+    
+    acc = acc / l_i[:, None]
+    lse = m_i + tl.log(l_i)
+    tl.store(
+    POut_ptr + bid * stride_pob + sid * stride_pos + h_offs[:, None] * stride_poh + d_lora[None, :] * stride_pod,
+        acc.to(tl.bfloat16),
+    )
+    tl.store(
+        PLse_ptr + bid * stride_plb + sid * stride_pls + h_offs * stride_plh,
+        lse,
+    )
 
 @triton.jit
 def _mla_reduce(
@@ -109,8 +113,8 @@ def _mla_reduce(
 ):
     bid = tl.program_id(0)
     hid = tl.program_id(1)
-    d_offs = tl.arrange(0, D_LORA)
-    s_offs = tl.arrange(0, NUM_SPLITS)
+    d_offs = tl.arange(0, D_LORA)
+    s_offs = tl.arange(0, NUM_SPLITS)
 
     lse = tl.load(
         PLse_ptr + bid * stride_plb + s_offs * stride_pls + hid * stride_plh,
@@ -124,7 +128,7 @@ def _mla_reduce(
     for s in tl.static_range(0, NUM_SPLITS):
         lse_s = tl.load(PLse_ptr + bid * stride_plb + s * stride_pls + hid * stride_plh,
         )
-        w = tl.exp(lse_e - max_lse) / sum_exp
+        w = tl.exp(lse_s - max_lse) / sum_exp
         partial_s = tl.load(
             POut_ptr + bid * stride_pob + s * stride_pos + hid * stride_poh + d_offs * stride_pod,
         ).to(tl.float32)
@@ -213,9 +217,9 @@ def custom_kernel(data: input_t) -> output_t:
     Q = bufs["q"]
     KV = bufs["kv"]
     Out = bufs["out"]
-    Pout = bufs["partial_out"]
-    PLSe = bufs["partial_lse"]
-    ns = bufs["nums_splits"]
+    POut = bufs["partial_out"]
+    PLse = bufs["partial_lse"]
+    ns = bufs["num_splits"]
 
     split_size = math.ceil(Sk / ns)    
 
@@ -241,7 +245,7 @@ def custom_kernel(data: input_t) -> output_t:
         Out.stride(0),  Out.stride(1),  Out.stride(2),
         NUM_SPLITS = ns,
         D_LORA = KV_LORA_RANK,
-        num_wraps = 2,
+        num_warps = 2,
     )    
     return Out
  
