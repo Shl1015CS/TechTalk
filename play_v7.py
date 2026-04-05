@@ -21,7 +21,7 @@ V_HEAD_DIM = KV_LORA_RANK                           #512
 SM_SCALE = 1.0 / (QK_HEAD_DIM ** 0.5)
 DQ_PAD = 1024
 
-FP8_DTYPE= torch.float8_e4m3fn
+FP8_DTYPE = torch.float8_e4m3fn
 
 @triton.jit
 def _mla_fused_decoder_kernel(
@@ -50,7 +50,7 @@ def _mla_fused_decoder_kernel(
         Q_ptr + bid * stride_qb
             + h_offs[:, None] * stride_qh
             + d_offs[None, :] * stride_qd,
-        mask=d_mask[None, :], other0.0,
+        mask=d_mask[None, :], other=0.0,
     ).to(tl.float32)
  
     m_i = tl.full([H], float('-inf'), dtype = tl.float32)
@@ -60,30 +60,30 @@ def _mla_fused_decoder_kernel(
     q_bf16 = q.to(tl.bfloat16)
 
     for sk_start in tl.range(0, Sk, BLOCK_SK):
-        sk_offs = sk_start+ sk_base
+        sk_offs = sk_start + sk_base
         sk_mask = sk_offs < Sk
  
         kv = tl.load(
-            KV + bid * stride_kvb + sk_offs[:, None] * stride_kvs + d_offs[None, :] * stride_kvd,
+            KV_ptr + bid * stride_kvb + sk_offs[:, None] * stride_kvs + d_offs[None, :] * stride_kvd,
             mask=sk_mask[:, None] & d_mask[None, :], other=0.0,
         ).to(tl.bfloat16)
  
-        scores = tl.dot(q_bf16, tl.tran(kv), out_type = tl.float32) * sm_scale
+        scores = tl.dot(q_bf16, tl.trans(kv), out_dtype = tl.float32) * sm_scale
         scores = tl.where(sk_mask[None, :], scores, float("-inf"))
         m_new = tl.maximum(m_i, tl.max(scores, axis = 1))
         alpha = tl.exp(m_i - m_new)
-        P = tl.exp(scores- m_new[:, None])
-        l_i = l_i * alpha + tl.sum(p, axis = 1)
-        acc =acc * alpha[:, None]
-        acc += tl.dot(p.to(tl.bfloat16), kv, out_dytpe = tl.float32)
+        P = tl.exp(scores - m_new[:, None])
+        l_i = l_i * alpha + tl.sum(P, axis = 1)
+        acc = acc * alpha[:, None]
+        acc += tl.dot(P.to(tl.bfloat16), kv, out_dtype = tl.float32)
         m_i = m_new
 
-    acc = acc / l_i[: None]
+    acc = acc / l_i[:, None]
  
     v_mask = d_offs < DV
     tl.store(
-        Out + bid * stride_ob + h_ofs[:, None] * stride_oh + d_offs[None, :] * stride_od,
-        acc.to(tl.bfloat16), mask=v_mask,
+        Out_ptr + bid * stride_ob + h_offs[:, None] * stride_oh + d_offs[None, :] * stride_od,
+        acc.to(tl.bfloat16), mask=v_mask[None, :],
     )
  
  
@@ -96,7 +96,7 @@ def _ensure_bufs(B, Sk) -> tuple:
     d:Dict = {}
     d["out"] = torch.empty((B, NUM_HEADS, V_HEAD_DIM), dtype=torch.bfloat16, device=DEVICE)
     d["q"] = torch.empty((B, NUM_HEADS, QK_HEAD_DIM), dtype=FP8_DTYPE, device=DEVICE)
-    d["kv"] = torch.empty((B, Sk, QK_HEAD_DIM), dtype=torch.bfloat16, device=DEVICE)
+    d["kv"] = torch.empty((B, Sk, QK_HEAD_DIM), dtype=FP8_DTYPE, device=DEVICE)
     _static_bufs[key] = d
     return key
  
