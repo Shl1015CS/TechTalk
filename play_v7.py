@@ -47,17 +47,17 @@ def _mla_decode_kernel(
         Q_ptr + bid * stride_qb
             + h_offs[:, None] * stride_qh
             + d_lora[None, :] * stride_qd,
-    ).to(tl.bfloat16)
+    )
 
     q_rope = tl.load(
         Q_ptr + bid * stride_qb
-        + h_offs[:, None] * stride_qh
-        +(D_LORA + d_rope[None, :]) * stride_qd,
-    ).to(tl.bfloat16)
+            + h_offs[:, None] * stride_qh
+            + (D_LORA + d_rope[None, :]) * stride_qd,
+    )
 
     m_i = tl.full([H], float('-inf'), dtype = tl.float32)
     l_i = tl.zeros([H], dtype = tl.float32)
-    acc = tl.zeros([H, DQ_PAD], dtype = tl.float32)
+    acc = tl.zeros([H, D_LORA], dtype = tl.float32)
 
     for sk_start in tl.range(0, Sk, BLOCK_SK):
         sk_offs = sk_start + tl.arange(0, BLOCK_SK)
@@ -66,23 +66,23 @@ def _mla_decode_kernel(
         kv_lora = tl.load(
             KV_ptr + bid * stride_kvb + sk_offs[:, None] * stride_kvs + d_lora[None, :] * stride_kvd,
             mask=sk_mask[:, None], other=0.0,
-        ).to(tl.bfloat16)
+        )
 
         kv_rope = tl.load(
-            KV_ptr + bid * stride_kvb + sk_offs[:, None] * stride_kvs + (D_LORA + d_lora[None, :]) * stride_kvd,
+            KV_ptr + bid * stride_kvb + sk_offs[:, None] * stride_kvs + (D_LORA + d_rope[None, :]) * stride_kvd,
             mask=sk_mask[:, None], other=0.0,            
-        ).to(tl.bfloat16)
+        )
 
-        scores = tl.dot(q_lora, tl.trans(kv_lora), out_dtype = tl.float32)
-        scores += tl.dot(q_rope, tl.trans(kv_rope), out_dtype = tl.float32)
-        scores *= sm_scale        
+        scores = tl.dot(q_lora, tl.trans(kv_lora), out_dtype=tl.float32)
+        scores += tl.dot(q_rope, tl.trans(kv_rope), out_dtype=tl.float32)
+        scores *= sm_scale
         scores = tl.where(sk_mask[None, :], scores, float('-inf'))
         m_new = tl.maximum(m_i, tl.max(scores, axis=1))
         alpha = tl.exp(m_i - m_new)
         P = tl.exp(scores - m_new[:, None])
         l_i = l_i * alpha + tl.sum(P, axis=1)
         acc = acc * alpha[:, None]
-        acc += tl.dot(P.to(tl.bfloat16), kv, out_dtype=tl.float32)
+        acc += tl.dot(P.to(tl.bfloat16), kv_lora.to(tl.bfloat16), out_dtype=tl.float32)
         m_i = m_new
 
     acc = acc / l_i[:, None]
@@ -179,8 +179,8 @@ def custom_kernel(data: input_t) -> output_t:
         D_LORA = KV_LORA_RANK,
         D_ROPE = QK_ROPE_HEAD_DIM,
         BLOCK_SK=64,
-        num_warps=4,
-        num_stages=2,
+        num_warps=8,
+        num_stages=3,
     )
     return Out
  
