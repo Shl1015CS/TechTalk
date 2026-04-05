@@ -88,13 +88,13 @@ def _mla_stage1(
         P = tl.exp(scores - m_new[:, None])
         l_i = l_i * alpha + tl.sum(P, axis=1)
         acc = acc * alpha[:, None]
-        acc += tl.dot(P.to(tl.bfloat16, kv_lora.to(bfloat16), out_dtype = tl.float32))
+        acc += tl.dot(P.to(tl.bfloat16), kv_lora.to(tl.bfloat16), out_dtype=tl.float32)
         m_i = m_new
     
     acc = acc / l_i[:, None]
     lse = m_i + tl.log(l_i)
     tl.store(
-    POut_ptr + bid * stride_pob + sid * stride_pos + h_offs[:, None] * stride_poh + d_lora[None, :] * stride_pod,
+        POut_ptr + bid * stride_pob + sid * stride_pos + h_offs[:, None] * stride_poh + d_lora[None, :] * stride_pod,
         acc.to(tl.bfloat16),
     )
     tl.store(
