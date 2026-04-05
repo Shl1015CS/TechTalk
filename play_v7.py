@@ -1,4 +1,3 @@
-import math
 from typing import Dict, Tuple
 import torch
 import torch.nn.functional as F
@@ -24,7 +23,7 @@ DQ_PAD = 1024
 FP8_DTYPE = torch.float8_e4m3fn
 
 @triton.jit
-def _mla_fused_decoder_kernel(
+def _mla_decode_kernel(
     Q_ptr,
     KV_ptr,
     Out_ptr,
@@ -33,70 +32,78 @@ def _mla_fused_decoder_kernel(
     stride_ob, stride_oh, stride_od,
     Sk,
     sm_scale,
-    DQ: tl.constexpr,
-    DV: tl.constexpr,
-    DQ_PAD: tl.constexpr,
     H: tl.constexpr,
+    D_LORA: tl.constexpr,
+    D_ROPE: tl.constexpr,
     BLOCK_SK: tl.constexpr,
 ):
     bid = tl.program_id(0)
  
-    d_offs = tl.arange(0, DQ_PAD)
-    d_mask = d_offs < DQ
     h_offs = tl.arange(0, H)
-    sk_base = tl.arange(0, BLOCK_SK)
- 
-    q = tl.load(
+    d_lora = tl.arange(0, D_LORA)
+    d_rope = tl.arange(0, D_ROPE)
+
+    q_lora = tl.load(
         Q_ptr + bid * stride_qb
             + h_offs[:, None] * stride_qh
-            + d_offs[None, :] * stride_qd,
-        mask=d_mask[None, :], other=0.0,
-    ).to(tl.float32)
- 
+            + d_lora[None, :] * stride_qd,
+    ).to(tl.bfloat16)
+
+    q_rope = tl.load(
+        Q_ptr + bid * stride_qb
+        + h_offs[:, None] * stride_qh
+        +(D_LORA + d_rope[None, :]) * stride_qd,
+    ).to(tl.bfloat16)
+
     m_i = tl.full([H], float('-inf'), dtype = tl.float32)
     l_i = tl.zeros([H], dtype = tl.float32)
     acc = tl.zeros([H, DQ_PAD], dtype = tl.float32)
 
-    q_bf16 = q.to(tl.bfloat16)
-
     for sk_start in tl.range(0, Sk, BLOCK_SK):
-        sk_offs = sk_start + sk_base
+        sk_offs = sk_start + tl.arange(0, BLOCK_SK)
         sk_mask = sk_offs < Sk
  
-        kv = tl.load(
-            KV_ptr + bid * stride_kvb + sk_offs[:, None] * stride_kvs + d_offs[None, :] * stride_kvd,
-            mask=sk_mask[:, None] & d_mask[None, :], other=0.0,
+        kv_lora = tl.load(
+            KV_ptr + bid * stride_kvb + sk_offs[:, None] * stride_kvs + d_lora[None, :] * stride_kvd,
+            mask=sk_mask[:, None], other=0.0,
         ).to(tl.bfloat16)
- 
-        scores = tl.dot(q_bf16, tl.trans(kv), out_dtype = tl.float32) * sm_scale
-        scores = tl.where(sk_mask[None, :], scores, float("-inf"))
-        m_new = tl.maximum(m_i, tl.max(scores, axis = 1))
+
+        kv_rope = tl.load(
+            KV_ptr + bid * stride_kvb + sk_offs[:, None] * stride_kvs + (D_LORA + d_lora[None, :]) * stride_kvd,
+            mask=sk_mask[:, None], other=0.0,            
+        ).to(tl.bfloat16)
+
+        scores = tl.dot(q_lora, tl.trans(kv_lora), out_dtype = tl.float32)
+        scores += tl.dot(q_rope, tl.trans(kv_rope), out_dtype = tl.float32)
+        scores *= sm_scale        
+        scores = tl.where(sk_mask[None, :], scores, float('-inf'))
+        m_new = tl.maximum(m_i, tl.max(scores, axis=1))
         alpha = tl.exp(m_i - m_new)
         P = tl.exp(scores - m_new[:, None])
-        l_i = l_i * alpha + tl.sum(P, axis = 1)
+        l_i = l_i * alpha + tl.sum(P, axis=1)
         acc = acc * alpha[:, None]
-        acc += tl.dot(P.to(tl.bfloat16), kv, out_dtype = tl.float32)
+        acc += tl.dot(P.to(tl.bfloat16), kv, out_dtype=tl.float32)
         m_i = m_new
 
     acc = acc / l_i[:, None]
- 
-    v_mask = d_offs < DV
+
     tl.store(
-        Out_ptr + bid * stride_ob + h_offs[:, None] * stride_oh + d_offs[None, :] * stride_od,
-        acc.to(tl.bfloat16), mask=v_mask[None, :],
+        Out_ptr + bid * stride_ob + h_offs[:, None] * stride_oh + d_lora[None, :] * stride_od,
+        acc.to(tl.bfloat16),
     )
  
  
 _static_bufs: Dict = {}
  
-def _ensure_bufs(B, Sk) -> tuple:
+def _ensure_bufs(B: int, Sk: int) -> tuple:
     key = (B, Sk)
     if key in _static_bufs:
         return key
-    d:Dict = {}
-    d["out"] = torch.empty((B, NUM_HEADS, V_HEAD_DIM), dtype=torch.bfloat16, device=DEVICE)
+    d: Dict = {}
+
     d["q"] = torch.empty((B, NUM_HEADS, QK_HEAD_DIM), dtype=FP8_DTYPE, device=DEVICE)
     d["kv"] = torch.empty((B, Sk, QK_HEAD_DIM), dtype=FP8_DTYPE, device=DEVICE)
+    d["out"] = torch.empty((B, NUM_HEADS, V_HEAD_DIM), dtype=torch.bfloat16, device=DEVICE)
     _static_bufs[key] = d
     return key
  
@@ -162,17 +169,18 @@ def custom_kernel(data: input_t) -> output_t:
     Out = bufs["out"]
  
     grid = (B,)
-    _mla_fused_decoder_kernel[grid](
+    _mla_decode_kernel[grid](
         Q, KV, Out,
         Q.stride(0), Q.stride(1), Q.stride(2),
         KV.stride(0), KV.stride(1), KV.stride(2),
         Out.stride(0), Out.stride(1), Out.stride(2),
         Sk, SM_SCALE,
-        DQ=QK_HEAD_DIM, DV=V_HEAD_DIM, DQ_PAD=DQ_PAD,
         H=NUM_HEADS,
+        D_LORA = KV_LORA_RANK,
+        D_ROPE = QK_ROPE_HEAD_DIM,
         BLOCK_SK=64,
-        num_warps = 4,
-        num_stages = 2,
+        num_warps=4,
+        num_stages=2,
     )
     return Out
  
