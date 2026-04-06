@@ -57,8 +57,6 @@ def _get_num_splits(B, Sk):
     return ns
 
 @triton.jit
-
-@triton.jit
 def _mla_stage1(
     Q_fp4, Q_sc, KV_fp4, KV_sc, POut, PLse,
     stride_qfb, stride_qfh, stride_qfd,
@@ -96,14 +94,14 @@ def _mla_stage1(
     m_i = tl.full([H], float('-inf'), dtype=tl.float32)
     l_i = tl.zeros([H], dtype=tl.float32)
     acc = tl.zeros([H, DV], dtype=tl.float32)
-    P_T_sc = tl.full([H, BSKS], 127, dtype=tl.uint8)
+    P_sc = tl.full([H, BSKS], 127, dtype=tl.uint8)
 
     for sk_start in tl.range(sk_begin, sk_begin + split_size, BSK):
         sk = sk_start + tl.arange(0, BSK)
         sk_mask = sk < Sk
  
         kvl_p = tl.load(KV_fp4 + bid * stride_kfb + sk[:, None] * stride_kfs + dl[None, :] * stride_kfd,
-                        mask=sk_mask[:, None], other=0)
+                        mask=sk_mask[:, None], other=0.0)
 
         kvl_s = tl.load(KV_sc + bid * stride_ksb + sk[:, None] * stride_kss + dls[None, :] * stride_ksd,
                         mask=sk_mask[:, None], other=127)
@@ -114,8 +112,8 @@ def _mla_stage1(
         kvr_s = tl.load(KV_sc + bid * stride_ksb + sk[:, None] * stride_kss + (DLS + drs[None, :]) * stride_ksd,
                         mask=sk_mask[:, None], other=127)
 
-        scores = tl.dot_scaled(ql_p, ql_s, "e2m1", tl.trans(kvl_p), kvl_s, "e2m1")
-        scores += tl.dot_scaled(qr_p, qr_s, "e2m1", tl.trans(kvr_p), kvr_s, "e2m1")
+        scores = tl.dot_scaled(ql_p, ql_s, "e2m1", tl.trans(kvl_p), tl.trans(kvl_s), "e2m1")
+        scores += tl.dot_scaled(qr_p, qr_s, "e2m1", tl.trans(kvr_p), tl.trans(kvr_s), "e2m1")
         scores *= sm_scale
         scores = tl.where(sk_mask[None, :], scores, float('-inf'))
         m_new = tl.maximum(m_i, tl.max(scores, axis=1))
@@ -123,11 +121,11 @@ def _mla_stage1(
         P = tl.exp(scores - m_new[:, None])
         l_i = l_i * alpha + tl.sum(P, axis=1)
         acc = acc * alpha[:, None]
-        P_T = tl.trans(P.to(tl.float8e4nv))
-        v_T = tl.dot_scaled(tl.trans(kvl_p), kvl_s, "e2m1", 
-                            P_T, P_T_sc, "e4m3", 
-                            lhs_k_pack = False)
-        acc += tl.trans(v_T)
+        P_fp8 = P.to(tl.float8e4nv)
+        acc = tl.dot_scaled(P_fp8, P_sc, "e4m3", 
+                            kvl_p, kvl_s, "e2m1", 
+                            rhs_k_pack = False, acc=acc)
+
         m_i = m_new
     
     acc = acc / l_i[:, None]
