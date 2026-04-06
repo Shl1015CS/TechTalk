@@ -1,7 +1,6 @@
 import math
-from typing import Dict, Tuple
+from typing import Dict
 import torch
-import torch.nn.functional as F
 import triton
 import triton.language as tl
 from task import input_t, output_t
@@ -23,6 +22,31 @@ SM_SCALE = 1.0 / (QK_HEAD_DIM ** 0.5)
 FP8_DTYPE = torch.float8_e4m3fn
 _BLOCK_SK = 64
 _NUM_CUS = 256
+_MX_BLOCK = 32
+
+def _quantize_to_mxfp4(tensor, block_size=_MX_BLOCK):
+    shape = tensor.shape
+    D = shape[-1]
+    assert D % block_size == 0
+    x = tensor.float().reshape(-1, D)
+    N = x.shape[0]
+    blocks = x.reshape(N, D // block_size, block_size)
+    blocks_max = blocks.abs().amax(dim=-1).clamp(min=1e-12)
+    e8m0 = torch.floor(torch.log2(blocks_max / 6.0).to(torch.int32)) + 127
+    e8m0 = e8m0.clamp(0, 255).to(torch.int8)
+    scale = (2 ** (e8m0.float() - 127.0)).unsqueeze(-1)
+    scaled = blocks / scale
+    lut = torch.tensor([0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0], device=x.device)
+    signs = (scaled < 0).to(torch.int8)
+    abs_v = scaled.abs().clamp(max=6.0)
+    indices = (abs_v.unsqueeze(-1) - lut).abs().argmin(dim=-1).to(torch.int8)
+    nibbles = indices | (signs << 3)
+    nibbles = nibbles.reshape(N, D)
+    packed = nibbles[:, ::2] | (nibbles[:, 1::2] << 4)
+    packed = packed.reshape(*shape[:-1] , (D // 2))
+    scales = e8m0.reshape(*shape[:-1] , (D // block_size))
+
+    return packed, scales
 
 def _get_num_splits(B, Sk):
     ns = max(16, math.ceil(_NUM_CUS / B))
@@ -33,53 +57,89 @@ def _get_num_splits(B, Sk):
     return ns
 
 @triton.jit
+def _fp4_to_bf16(nibble):
+    sign = nibble >> 3
+    mag = nibble & 7
+    exp_bits = mag >> 1
+    man_bits = mag & 1
+    exp_f = (exp_bits.to(tl.float32) - 1.0)
+    power = tl.where(exp_bits > 0, tl.exp2(exp_f), 0.0)
+    mantissa = 1.0 + man_bits.to(tl.float32) * 0.5
+    value = tl.where(exp_bits > 0, power * mantissa,
+                      man_bits.to(tl.float32) * 0.5)
+    value = tl.where(sign > 0, -value, value)
+    return value.to(tl.bfloat16)
+
+@triton.jit
 def _mla_stage1(
-    Q_ptr, KV_ptr, POut_ptr, PLse_ptr,
+    Q_ptr, KV_fp4_ptr, KV_scale_ptr, KV_rope_ptr, POut_ptr, PLse_ptr,
     stride_qb, stride_qh, stride_qd,
-    stride_kvb, stride_kvs, stride_kvd,
+    stride_fp4b, stride_fp4s, stride_fp4d,
+    stride_scb, stride_scs, stride_scd,
+    stride_rpb, stride_rps, stride_rpd,
     stride_pob, stride_pos, stride_poh, stride_pod,
     stride_plb, stride_pls, stride_plh,
     Sk, sm_scale, split_size,
     H: tl.constexpr,
     D_LORA: tl.constexpr,
+    D_LORA_HALF: tl.constexpr,
+    D_SCALE_LORA: tl.constexpr,
     D_ROPE: tl.constexpr,
     BLOCK_SK: tl.constexpr,
 ):
     bid = tl.program_id(0)
     sid = tl.program_id(1)
     h_offs = tl.arange(0, H)
-    d_lora = tl.arange(0, D_LORA)
+    d_half = tl.arange(0, D_LORA_HALF)
     d_rope = tl.arange(0, D_ROPE)
 
-    q_lora = tl.load(
-        Q_ptr + bid * stride_qb + h_offs[:, None] * stride_qh + d_lora[None, :] * stride_qd,
-    )
+    d_even = d_half * 2
+    d_odd = d_half * 2 + 1
+
+    q_even = tl.load(
+        Q_ptr + bid * stride_qb + h_offs[:, None] * stride_qh + d_even[None, :] * stride_qd,
+    ).to(tl.bfloat16)
+    q_odd = tl.load(
+        Q_ptr + bid * stride_qb + h_offs[:, None] * stride_qh + d_odd[None, :] * stride_qd,
+    ).to(tl.bfloat16)
 
     q_rope = tl.load(
         Q_ptr + bid * stride_qb + h_offs[:, None] * stride_qh + (D_LORA + d_rope[None, :]) * stride_qd,
-    )
+    ).to(tl.bfloat16)
 
     sk_begin = sid * split_size
 
     m_i = tl.full([H], float('-inf'), dtype=tl.float32)
     l_i = tl.zeros([H], dtype=tl.float32)
-    acc = tl.zeros([H, D_LORA], dtype=tl.float32)
+    acc_even = tl.zeros([H, D_LORA_HALF], dtype=tl.float32)
+    acc_odd = tl.zeros([H, D_LORA_HALF], dtype=tl.float32)
 
+    scale_idx = d_half // 16
     for sk_start in tl.range(sk_begin, sk_begin + split_size, BLOCK_SK):
         sk_offs = sk_start + tl.arange(0, BLOCK_SK)
         sk_mask = sk_offs < Sk
  
-        kv_lora = tl.load(
-            KV_ptr + bid * stride_kvb + sk_offs[:, None] * stride_kvs + d_lora[None, :] * stride_kvd,
+        packed = tl.load(
+            KV_fp4_ptr + bid * stride_fp4b + sk_offs[:, None] * stride_fp4s + d_half[None, :] * stride_fp4d,
             mask=sk_mask[:, None], other=0.0,
         )
+
+        scale_raw = tl.load(
+            KV_scale_ptr + bid * stride_scb + sk_offs[:, None] * stride_scs + scale_idx[None, :] * stride_kvd,
+            mask=sk_mask[:, None], other=0.0,
+        )
+        scale_f = tl.exp2((scale_raw.to(float32) - 127))
+
+        kv_even = _fp4_to_bf16(packed & 0x0F) * scale_f.to(tl.bfloat16)
+        kv_odd = _fp4_to_bf16((packed >> 4) & 0x0F) * scale_f.to(tl.bfloat16)
 
         kv_rope = tl.load(
-            KV_ptr + bid * stride_kvb + sk_offs[:, None] * stride_kvs + (D_LORA + d_rope[None, :]) * stride_kvd,
+            KV_rope_ptr + bid * stride_rpb + sk_offs[:, None] * stride_rps + d_rope[None, :] * stride_rpd,
             mask=sk_mask[:, None], other=0.0,
-        )
+        ).to(tl.bfloat16)
 
-        scores = tl.dot(q_lora, tl.trans(kv_lora), out_dtype=tl.float32)
+        scores = tl.dot(q_even, tl.trans(kv_even), out_dtype=tl.float32)
+        scores += tl.dot(q_odd, tl.trans(kv_odd), out_dtype=tl.float32)
         scores += tl.dot(q_rope, tl.trans(kv_rope), out_dtype=tl.float32)
         scores *= sm_scale
         scores = tl.where(sk_mask[None, :], scores, float('-inf'))
@@ -87,15 +147,23 @@ def _mla_stage1(
         alpha = tl.exp(m_i - m_new)
         P = tl.exp(scores - m_new[:, None])
         l_i = l_i * alpha + tl.sum(P, axis=1)
-        acc = acc * alpha[:, None]
-        acc += tl.dot(P.to(kv_lora.dtype), kv_lora, out_dtype=tl.float32)
+        acc_even = acc_even * alpha[:, None]
+        acc_odd = acc_odd * alpha[:, None]
+        P_bf16 = P.to(tl.bfloat16)
+        acc_even += tl.dot(P_bf16, kv_even, out_dtype = tl.float32)
+        acc_odd += tl.dot(P_bf16, kv_odd, out_dtype = tl.float32)
         m_i = m_new
     
-    acc = acc / l_i[:, None]
+    acc_even = acc_even / l_i[:, None]
+    acc_odd = acc_odd / l_i[:, None]
     lse = m_i + tl.log(l_i)
     tl.store(
-        POut_ptr + bid * stride_pob + sid * stride_pos + h_offs[:, None] * stride_poh + d_lora[None, :] * stride_pod,
-        acc.to(tl.bfloat16),
+        POut_ptr + bid * stride_pob + sid * stride_pos + h_offs[:, None] * stride_poh + d_even[None, :] * stride_pod,
+        acc_even.to(tl.bfloat16),
+    )
+    tl.store(
+        POut_ptr + bid * stride_pob + sid * stride_pos + h_offs[:, None] * stride_poh + d_odd[None, :] * stride_pod,
+        acc_odd.to(tl.bfloat16),
     )
     tl.store(
         PLse_ptr + bid * stride_plb + sid * stride_pls + h_offs * stride_plh,
@@ -126,8 +194,7 @@ def _mla_reduce(
 
     acc = tl.zeros([D_LORA], dtype = tl.float32)
     for s in tl.static_range(0, NUM_SPLITS):
-        lse_s = tl.load(PLse_ptr + bid * stride_plb + s * stride_pls + hid * stride_plh,
-        )
+        lse_s = tl.load(PLse_ptr + bid * stride_plb + s * stride_pls + hid * stride_plh)
         w = tl.exp(lse_s - max_lse) / sum_exp
         partial_s = tl.load(
             POut_ptr + bid * stride_pob + s * stride_pos + hid * stride_poh + d_offs * stride_pod,
@@ -149,7 +216,9 @@ def _ensure_bufs(B: int, Sk: int) -> tuple:
     d: Dict = {}
 
     d["q"] = torch.empty((B, NUM_HEADS, QK_HEAD_DIM), dtype=FP8_DTYPE, device=DEVICE)
-    d["kv"] = torch.empty((B, Sk, QK_HEAD_DIM), dtype=FP8_DTYPE, device=DEVICE)
+    d["kv_fp4"] = torch.empty((B, Sk, QK_HEAD_DIM // 2), dtype=torch.uint8, device=DEVICE)
+    d["kv_scale"] = torch.empty((B, Sk, QK_HEAD_DIM // _MX_BLOCK), dtype=torch.uint8, device=DEVICE)
+    d["kv_rope"] = torch.empty((B, Sk, QK_HEAD_DIM ), dtype=FP8_DTYPE, device=DEVICE)
     d["out"] = torch.empty((B, NUM_HEADS, V_HEAD_DIM), dtype=torch.bfloat16, device=DEVICE)
     d["partial_out"] = torch.empty((B, ns, NUM_HEADS, V_HEAD_DIM), dtype=torch.bfloat16, device=DEVICE)
     d["partial_lse"] = torch.empty((B, ns, NUM_HEADS), dtype=torch.float32, device=DEVICE)
@@ -176,8 +245,13 @@ def generate_input(batchsize: int, qseqlen: int, kvseqlen: int, seed: int) -> in
     key = _ensure_bufs(batchsize, kvseqlen)
     bufs = _static_bufs[key]
     bufs["q"].copy_(q_raw.view(batchsize, NUM_HEADS, QK_HEAD_DIM))
-    bufs["kv"].copy_(kv_raw.view(batchsize, kvseqlen, QK_HEAD_DIM).to(FP8_DTYPE))
- 
+    kv_3d = kv_raw.view(batchsize, kvseqlen, QK_HEAD_DIM)
+    fp4_packed, fp4_scales = _quantize_to_mxfp4(kv_3d)
+    bufs["kv_fp4"].copy_(fp4_packed)
+    bufs["kv_scale"].copy(fp4_scales)
+
+    bufs["kv_rope"].copy(kv_3d[:, :, KV_LORA_RANK:].to(FP8_DTYPE))
+
     kv_data = {
         "bf16": kv_raw,
         "_key": key,
@@ -211,11 +285,17 @@ def custom_kernel(data: input_t) -> output_t:
         key = _ensure_bufs(B, Sk)
         bufs = _static_bufs[key]
         bufs["q"].copy_(q.view(B, NUM_HEADS, QK_HEAD_DIM).to(FP8_DTYPE))
-        bufs["kv"].copy_(kv_data["bf16"].view(B, Sk, QK_HEAD_DIM).to(FP8_DTYPE))
+        kv_3d = kv_data["bf16"].view(B, Sk, QK_HEAD_DIM)
+        fp4_packed, fp4_scales = _quantize_to_mxfp4(kv_3d)
+        bufs["kv_fp4"].copy_(fp4_packed)
+        bufs["kv_scale"].copy_(fp4_scales)
+        bufs["kv_rope"].copy_(kv_3d[:, :, KV_LORA_RANK:].to(FP8_DTYPE))
     bufs = _static_bufs[key]
  
     Q = bufs["q"]
-    KV = bufs["kv"]
+    KV_fp4 = bufs["kv_fp4"]
+    KV_scale = bufs["kv_scale"]    
+    KV_rope = bufs["kv_rope"]
     Out = bufs["out"]
     POut = bufs["partial_out"]
     PLse = bufs["partial_lse"]
@@ -224,14 +304,18 @@ def custom_kernel(data: input_t) -> output_t:
     split_size = math.ceil(Sk / ns)    
 
     _mla_stage1[(B, ns)](
-        Q, KV, POut, PLse,
+        Q, KV_fp4, KV_scale, KV_rope, POut, PLse,
         Q.stride(0), Q.stride(1), Q.stride(2),
-        KV.stride(0), KV.stride(1), KV.stride(2),
+        KV_fp4.stride(0), KV_fp4.stride(1), KV_fp4.stride(2),
+        KV_scale.stride(0), KV_scale.stride(1), KV_scale.stride(2),
+        KV_rope.stride(0), KV_rope.stride(1), KV_rope.stride(2),
         POut.stride(0), POut.stride(1), POut.stride(2), POut.stride(3),
         PLse.stride(0), PLse.stride(1), PLse.stride(2),
         Sk, SM_SCALE, split_size,
         H=NUM_HEADS,
         D_LORA = KV_LORA_RANK,
+        D_LORA_HALF = KV_LORA_RANK // 2,
+        N_SCALE_LORA = KV_LORA_RANK // _MX_BLOCK,
         D_ROPE = QK_ROPE_HEAD_DIM,
         BLOCK_SK= _BLOCK_SK,
         num_warps=4,
