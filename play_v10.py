@@ -94,7 +94,6 @@ def _mla_stage1(
     m_i = tl.full([H], float('-inf'), dtype=tl.float32)
     l_i = tl.zeros([H], dtype=tl.float32)
     acc = tl.zeros([H, DV], dtype=tl.float32)
-    P_sc = tl.full([H, BSKS], 127, dtype=tl.uint8)
 
     for sk_start in tl.range(sk_begin, sk_begin + split_size, BSK):
         sk = sk_start + tl.arange(0, BSK)
@@ -112,8 +111,8 @@ def _mla_stage1(
         kvr_s = tl.load(KV_sc + bid * stride_ksb + sk[:, None] * stride_kss + (DLS + drs[None, :]) * stride_ksd,
                         mask=sk_mask[:, None], other=127)
 
-        scores = tl.dot_scaled(ql_p, ql_s, "e2m1", tl.trans(kvl_p), tl.trans(kvl_s), "e2m1")
-        scores += tl.dot_scaled(qr_p, qr_s, "e2m1", tl.trans(kvr_p), tl.trans(kvr_s), "e2m1")
+        scores = tl.dot_scaled(ql_p, ql_s, "e2m1", tl.trans(kvl_p), kvl_s, "e2m1")
+        scores += tl.dot_scaled(qr_p, qr_s, "e2m1", tl.trans(kvr_p), kvr_s, "e2m1")
         scores *= sm_scale
         scores = tl.where(sk_mask[None, :], scores, float('-inf'))
         m_new = tl.maximum(m_i, tl.max(scores, axis=1))
@@ -121,11 +120,28 @@ def _mla_stage1(
         P = tl.exp(scores - m_new[:, None])
         l_i = l_i * alpha + tl.sum(P, axis=1)
         acc = acc * alpha[:, None]
-        P_fp8 = P.to(tl.float8e4nv)
-        acc = tl.dot_scaled(P_fp8, P_sc, "e4m3", 
-                            kvl_p, kvl_s, "e2m1", 
-                            rhs_k_pack = False, acc=acc)
+        dv = tl.arange(0, DV)
+        btype_idx = dv // 2
+        is_high = (dv % 2).to(tl.uint8)
+        packed_g = tl.load(KV_FP4 + bid * stride_kfb + sk[:, None] * stride_kfs + btype_idx[None, :] * stride_kfd,
+                            mask=sk_mask[:, None], other = 0)
+        nibble = tl.where(is_high[None, :] == 1, (packed_g >> 4) & 0x0F, packed_g & 0x0F)
 
+        sign = nibble >> 3
+        mag = nibble & 7
+        exp_bits = mag & 1
+        exp_f = exp_bits.to(tl.float32) - 1.0
+        power = tl.where(exp_bits > 0, tl.exp2(exp_f), 0.0)
+        mantissa = 1.0 + man_bit.to(tl.float32) * 0.5
+        fp4_val = tl.where(exp_bits > 0, power * mantissa, man_bit.to(tl.float32) * 0.5)
+        fp4_val = tl.where(sign > 0, -fp4_val,fp4_val)
+        scale_grp = dv // 32
+        scale_g = tl.load(
+            KV_sc + bid * stride_ksb + sk[:, None] * stride_kss + scale_grp[None, :] * stride_ksd,
+            mask = sk_mask[:, None], other = 127)
+        kv_v = (fp4_val * tl.exp2((scale_g.to(tl.float32) -127))).to(bfloat16)
+
+        acc += tl.dot(P.to(bfloat16), kv_v, out_dtype = tl.float32)
         m_i = m_new
     
     acc = acc / l_i[:, None]
