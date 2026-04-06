@@ -32,8 +32,8 @@ def _quantize_to_mxfp4(tensor, block_size=_MX_BLOCK):
     N = x.shape[0]
     blocks = x.reshape(N, D // block_size, block_size)
     blocks_max = blocks.abs().amax(dim=-1).clamp(min=1e-12)
-    e8m0 = torch.floor(torch.log2(blocks_max / 6.0).to(torch.int32)) + 127
-    e8m0 = e8m0.clamp(0, 255).to(torch.int8)
+    e8m0 = torch.floor(torch.log2(blocks_max / 6.0)).to(torch.int32) + 127
+    e8m0 = e8m0.clamp(0, 255).to(torch.uint8)
     scale = (2 ** (e8m0.float() - 127.0)).unsqueeze(-1)
     scaled = blocks / scale
     lut = torch.tensor([0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0], device=x.device)
@@ -125,10 +125,10 @@ def _mla_stage1(
         )
 
         scale_raw = tl.load(
-            KV_scale_ptr + bid * stride_scb + sk_offs[:, None] * stride_scs + scale_idx[None, :] * stride_kvd,
+            KV_scale_ptr + bid * stride_scb + sk_offs[:, None] * stride_scs + scale_idx[None, :] * stride_scd,
             mask=sk_mask[:, None], other=0.0,
         )
-        scale_f = tl.exp2((scale_raw.to(float32) - 127))
+        scale_f = tl.exp2((scale_raw.to(tl.float32) - 127.0))
 
         kv_even = _fp4_to_bf16(packed & 0x0F) * scale_f.to(tl.bfloat16)
         kv_odd = _fp4_to_bf16((packed >> 4) & 0x0F) * scale_f.to(tl.bfloat16)
@@ -218,7 +218,7 @@ def _ensure_bufs(B: int, Sk: int) -> tuple:
     d["q"] = torch.empty((B, NUM_HEADS, QK_HEAD_DIM), dtype=FP8_DTYPE, device=DEVICE)
     d["kv_fp4"] = torch.empty((B, Sk, QK_HEAD_DIM // 2), dtype=torch.uint8, device=DEVICE)
     d["kv_scale"] = torch.empty((B, Sk, QK_HEAD_DIM // _MX_BLOCK), dtype=torch.uint8, device=DEVICE)
-    d["kv_rope"] = torch.empty((B, Sk, QK_HEAD_DIM ), dtype=FP8_DTYPE, device=DEVICE)
+    d["kv_rope"] = torch.empty((B, Sk, QK_ROPE_HEAD_DIM), dtype=FP8_DTYPE, device=DEVICE)
     d["out"] = torch.empty((B, NUM_HEADS, V_HEAD_DIM), dtype=torch.bfloat16, device=DEVICE)
     d["partial_out"] = torch.empty((B, ns, NUM_HEADS, V_HEAD_DIM), dtype=torch.bfloat16, device=DEVICE)
     d["partial_lse"] = torch.empty((B, ns, NUM_HEADS), dtype=torch.float32, device=DEVICE)
@@ -248,9 +248,9 @@ def generate_input(batchsize: int, qseqlen: int, kvseqlen: int, seed: int) -> in
     kv_3d = kv_raw.view(batchsize, kvseqlen, QK_HEAD_DIM)
     fp4_packed, fp4_scales = _quantize_to_mxfp4(kv_3d)
     bufs["kv_fp4"].copy_(fp4_packed)
-    bufs["kv_scale"].copy(fp4_scales)
+    bufs["kv_scale"].copy_(fp4_scales)
 
-    bufs["kv_rope"].copy(kv_3d[:, :, KV_LORA_RANK:].to(FP8_DTYPE))
+    bufs["kv_rope"].copy_(kv_3d[:, :, KV_LORA_RANK:].to(FP8_DTYPE))
 
     kv_data = {
         "bf16": kv_raw,
