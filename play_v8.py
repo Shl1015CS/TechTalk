@@ -25,7 +25,7 @@ _BLOCK_SK = 64
 _NUM_CUS = 256
 
 def _get_num_splits(B, Sk):
-    ns = max(4, math.ceil(_NUM_CUS / B))
+    ns = max(16, math.ceil(_NUM_CUS / B))
     ns = 1 << math.ceil(math.log2(ns))
     max_ns = Sk // _BLOCK_SK
     ns = min(ns,max_ns)
@@ -88,7 +88,7 @@ def _mla_stage1(
         P = tl.exp(scores - m_new[:, None])
         l_i = l_i * alpha + tl.sum(P, axis=1)
         acc = acc * alpha[:, None]
-        acc += tl.dot(P.to(tl.bfloat16), kv_lora.to(tl.bfloat16), out_dtype=tl.float32)
+        acc += tl.dot(P.to(kv_lora.dtype), kv_lora, out_dtype=tl.float32)
         m_i = m_new
     
     acc = acc / l_i[:, None]
