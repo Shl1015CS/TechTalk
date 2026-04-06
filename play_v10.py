@@ -84,11 +84,11 @@ def _mla_stage1(
     dr = tl.arange(0, DRH)
     drs = tl.arange(0, DRS)
 
-    ql_p = tl.load(Q_fp4 + bid * stride_qfb + h_offs[:, None] * stride_qfh + d[None, :] * stride_qfd)
-    ql_s = tl.load(Q_sc + bid * stride_qsb + h_offs[:, None] * stride_qsh + dls[None, :] * stride_qsd)
+    ql_p = tl.load(Q_fp4 + bid * stride_qfb + h[:, None] * stride_qfh + dl[None, :] * stride_qfd)
+    ql_s = tl.load(Q_sc + bid * stride_qsb + h[:, None] * stride_qsh + dls[None, :] * stride_qsd)
 
-    qr_p = tl.load(Q_fp4 + bid * stride_qfb + h_offs[:, None] * stride_qfh + (DLH + dr[None, :]) * stride_qfd)
-    qr_s = tl.load(Q_sc + bid * stride_qsb + h_offs[:, None] * stride_qsh + (DLS + drs[None, :]) * stride_qsd)
+    qr_p = tl.load(Q_fp4 + bid * stride_qfb + h[:, None] * stride_qfh + (DLH + dr[None, :]) * stride_qfd)
+    qr_s = tl.load(Q_sc + bid * stride_qsb + h[:, None] * stride_qsh + (DLS + drs[None, :]) * stride_qsd)
     sk_begin = sid * split_size
 
     m_i = tl.full([H], float('-inf'), dtype=tl.float32)
@@ -100,16 +100,16 @@ def _mla_stage1(
         sk = sk_start + tl.arange(0, BSK)
         sk_mask = sk < Sk
  
-        kvl_p = tl.load(KV_fp4 + bid * stride_kfb + sk_offs[:, None] * stride_kfs + dl[None, :] * stride_kfd,
+        kvl_p = tl.load(KV_fp4 + bid * stride_kfb + sk[:, None] * stride_kfs + dl[None, :] * stride_kfd,
                         mask=sk_mask[:, None], other=0.0)
 
-        kvl_s = tl.load(KV_sc + bid * stride_ksb + sk[:, None] * stride_kss + dl[None, :] * stride_ksd,
+        kvl_s = tl.load(KV_sc + bid * stride_ksb + sk[:, None] * stride_kss + dls[None, :] * stride_ksd,
                         mask=sk_mask[:, None], other=127)
 
         kvr_p = tl.load(KV_fp4 + bid * stride_kfb + sk[:, None] * stride_kfs + (DLH + dr[None, :]) * stride_kfd,
                         mask=sk_mask[:, None], other=0)
 
-        kvr_s = tl.load(KV_sc + bid * stride_ksb + sk[:, None] * stride_kss + (DLH + drs[None, :]) * stride_ksd,
+        kvr_s = tl.load(KV_sc + bid * stride_ksb + sk[:, None] * stride_kss + (DLS + drs[None, :]) * stride_ksd,
                         mask=sk_mask[:, None], other=127)
 
         scores = tl.dot_scaled(ql_p, ql_s, "e2m1", tl.trans(kvl_p), tl.trans(kvl_s), "e2m1")
@@ -131,7 +131,7 @@ def _mla_stage1(
     acc = acc / l_i[:, None]
     lse = m_i + tl.log(l_i)
     dv = tl.arange(0, DV)
-    tl.store(POutr + bid * stride_pob + sid * stride_pos + h[:, None] * stride_poh + dv[None, :] * stride_pod,
+    tl.store(POut + bid * stride_pob + sid * stride_pos + h[:, None] * stride_poh + dv[None, :] * stride_pod,
         acc.to(tl.bfloat16))
 
     tl.store(PLse + bid * stride_plb + sid * stride_pls + h * stride_plh, lse)
@@ -181,7 +181,6 @@ def _ensure_bufs(B: int, Sk: int) -> tuple:
     d["q_scale"] = torch.empty((B, NUM_HEADS, QK_HEAD_DIM // _MX_BLOCK), dtype=torch.uint8, device=DEVICE)
     d["kv_fp4"] = torch.empty((B, Sk, QK_HEAD_DIM // 2), dtype=torch.uint8, device=DEVICE)
     d["kv_scale"] = torch.empty((B, Sk, QK_HEAD_DIM // _MX_BLOCK), dtype=torch.uint8, device=DEVICE)
-    d["kv_rope"] = torch.empty((B, Sk, QK_ROPE_HEAD_DIM), dtype=FP8_DTYPE, device=DEVICE)
     d["out"] = torch.empty((B, NUM_HEADS, V_HEAD_DIM), dtype=torch.bfloat16, device=DEVICE)
     d["partial_out"] = torch.empty((B, ns, NUM_HEADS, V_HEAD_DIM), dtype=torch.bfloat16, device=DEVICE)
     d["partial_lse"] = torch.empty((B, ns, NUM_HEADS), dtype=torch.float32, device=DEVICE)
@@ -210,7 +209,7 @@ def generate_input(batchsize: int, qseqlen: int, kvseqlen: int, seed: int) -> in
 
     q_fp4, q_sc = _quantize_to_mxfp4(q_raw.view(batchsize, NUM_HEADS, QK_HEAD_DIM))
     bufs["q_fp4"].copy_(q_fp4)
-    bufs["q_sc"].copy_(q_sc)
+    bufs["q_scale"].copy_(q_sc)
 
     kv_3d = kv_raw.view(batchsize, kvseqlen, QK_HEAD_DIM)
     kv_fp4, kv_sc = _quantize_to_mxfp4(kv_3d)
@@ -276,8 +275,8 @@ def custom_kernel(data: input_t) -> output_t:
         DRH = QK_ROPE_HEAD_DIM // 2,
         DRS = QK_ROPE_HEAD_DIM // _MX_BLOCK,
         DV = V_HEAD_DIM,
-        BSK= BLOCK_SK,
-        BSKS= BLOCK_SK // _MX_BLOCK,
+        BSK= _BLOCK_SK,
+        BSKS= _BLOCK_SK // _MX_BLOCK,
         num_warps=8,
         num_stages=2,
     )
