@@ -123,13 +123,14 @@ def _mla_stage1(
         dv = tl.arange(0, DV)
         btype_idx = dv // 2
         is_high = (dv % 2).to(tl.uint8)
-        packed_g = tl.load(KV_FP4 + bid * stride_kfb + sk[:, None] * stride_kfs + btype_idx[None, :] * stride_kfd,
+        packed_g = tl.load(KV_fp4 + bid * stride_kfb + sk[:, None] * stride_kfs + btype_idx[None, :] * stride_kfd,
                             mask=sk_mask[:, None], other = 0)
         nibble = tl.where(is_high[None, :] == 1, (packed_g >> 4) & 0x0F, packed_g & 0x0F)
 
         sign = nibble >> 3
         mag = nibble & 7
-        exp_bits = mag & 1
+        exp_bits = mag >> 1
+        man_bit = mag & 1
         exp_f = exp_bits.to(tl.float32) - 1.0
         power = tl.where(exp_bits > 0, tl.exp2(exp_f), 0.0)
         mantissa = 1.0 + man_bit.to(tl.float32) * 0.5
@@ -139,9 +140,9 @@ def _mla_stage1(
         scale_g = tl.load(
             KV_sc + bid * stride_ksb + sk[:, None] * stride_kss + scale_grp[None, :] * stride_ksd,
             mask = sk_mask[:, None], other = 127)
-        kv_v = (fp4_val * tl.exp2((scale_g.to(tl.float32) -127))).to(bfloat16)
+        kv_v = (fp4_val * tl.exp2((scale_g.to(tl.float32) -127.0))).to(tl.bfloat16)
 
-        acc += tl.dot(P.to(bfloat16), kv_v, out_dtype = tl.float32)
+        acc += tl.dot(P.to(tl.bfloat16), kv_v, out_dtype=tl.float32)
         m_i = m_new
     
     acc = acc / l_i[:, None]
